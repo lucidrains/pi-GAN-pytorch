@@ -1,6 +1,6 @@
-## pi-GAN - Pytorch
+## π-GAN - Pytorch
 
-Implementation of <a href="https://arxiv.org/abs/2012.00926">pi-GAN</a>, for 3d-aware image synthesis, in Pytorch.
+Implementation of <a href="https://arxiv.org/abs/2012.00926">π-GAN</a>, for 3d-aware image synthesis, in Pytorch.
 
 <a href="https://www.youtube.com/watch?v=0HCdof9BGtw">Project video from authors</a>
 
