@@ -120,8 +120,9 @@ class SirenNet(nn.Module):
 # generator
 
 class Generator(nn.Module):
-    def __init__(self, image_size, dim, dim_hidden):
+    def __init__(self, image_size, dim, dim_hidden, siren_num_layers = 6):
         super().__init__()
+
         self.mapping = MappingNetwork(
             dim = dim,
             dim_out = dim_hidden
@@ -130,13 +131,28 @@ class Generator(nn.Module):
         self.siren = SirenNet(
             dim_in = 2,
             dim_hidden = dim_hidden,
-            dim_out = 3,
-            num_layers = 6
+            dim_out = dim_hidden,
+            num_layers = siren_num_layers
         )
 
-    def forward(self, latent, coors):
+        self.to_alpha = nn.Linear(dim_hidden, 1)
+
+        self.to_rgb_siren = Siren(
+            dim_in = dim_hidden + 2,
+            dim_out = dim_hidden
+        )
+
+        self.to_rgb= nn.Linear(dim_hidden, 3)
+
+    def forward(self, latent, ray_direction, coors):
         gamma, beta = self.mapping(latent)
-        return self.siren(coors, gamma, beta)
+        x = self.siren(coors, gamma, beta)
+        alpha = self.to_alpha(x)
+
+        x = torch.cat((x, ray_direction), dim = -1)
+        x = self.to_rgb_siren(x, gamma, beta)
+        rgb = self.to_rgb(x)
+        return rgb, alpha
 
 class piGAN(nn.Module):
     def __init__(self, image_size, dim, dim_hidden):
@@ -157,7 +173,8 @@ class piGAN(nn.Module):
             dim_hidden = dim_hidden
         )
 
-    def forward(self, x):
+    def forward(self, x, ray_direction):
         device, b = x.device, x.shape[0]
         coors = repeat(self.coors, 'n c -> b n c', b = b).float()
-        return self.G(x, coors)
+        ray_direction = repeat(ray_direction, 'b c -> b n c', n = coors.shape[1])
+        return self.G(x, ray_direction, coors)
