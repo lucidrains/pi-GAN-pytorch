@@ -183,6 +183,8 @@ class Generator(nn.Module):
         ray_direction = repeat(ray_direction, 'b c -> b n c', n = coors.shape[1])
         return self.G(x, ray_direction, coors)
 
+# discriminator
+
 class DiscriminatorBlock(nn.Module):
     def __init__(self, dim, dim_out):
         super().__init__()
@@ -233,3 +235,21 @@ class Discriminator(nn.Module):
         for layer in self.layers:
             x = layer(x)
         return self.final_conv(x)
+
+# pi-GAN class
+
+class piGAN(nn.Module):
+    def __init__(self):
+        super().__init__()
+
+    def forward(self, x):
+        return x
+
+# trainer
+
+class Trainer(nn.Module):
+    def __init__(self):
+        super().__init__()
+
+    def forward(self, x):
+        return x
