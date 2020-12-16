@@ -3,6 +3,7 @@ import torch
 from torch import nn, einsum
 import torch.nn.functional as F
 
+from pi_gan_pytorch.coordconv import CoordConv
 from einops import rearrange, repeat
 
 # helper
@@ -185,12 +186,12 @@ class Generator(nn.Module):
 class DiscriminatorBlock(nn.Module):
     def __init__(self, dim, dim_out):
         super().__init__()
-        self.res = nn.Conv2d(dim, dim_out, 1)
+        self.res = CoordConv(dim, dim_out, kernel_size = 1)
 
         self.net = nn.Sequential(
-            nn.Conv2d(dim, dim_out, 3, padding = 1),
+            CoordConv(dim, dim_out, kernel_size = 3, padding = 1),
             leaky_relu(),
-            nn.Conv2d(dim_out, dim_out, 3, padding = 1),
+            CoordConv(dim_out, dim_out, kernel_size = 3, padding = 1),
             leaky_relu()
         )
 
@@ -224,8 +225,8 @@ class Discriminator(nn.Module):
                 dim_out = out_chan
             ))
 
-        self.initial_conv = nn.Sequential(nn.Conv2d(3, init_chan, 1), leaky_relu())
-        self.final_conv = nn.Conv2d(final_chan, 1, 2)
+        self.initial_conv = nn.Sequential(CoordConv(3, init_chan, kernel_size = 1), leaky_relu())
+        self.final_conv = CoordConv(final_chan, 1, kernel_size = 2)
 
     def forward(self, x):
         x = self.initial_conv(x)
