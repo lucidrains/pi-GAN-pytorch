@@ -10,6 +10,9 @@ from einops import rearrange, repeat
 def exists(val):
     return val is not None
 
+def leaky_relu(p = 0.2):
+    return nn.LeakyReLU(p)
+
 # sin activation
 
 class Sine(nn.Module):
@@ -78,7 +81,7 @@ class MappingNetwork(nn.Module):
 
         layers = []
         for i in range(depth):
-            layers.extend([EqualLinear(dim, dim, lr_mul), nn.LeakyReLU(0.1)])
+            layers.extend([EqualLinear(dim, dim, lr_mul), leaky_relu()])
 
         self.net = nn.Sequential(*layers)
 
@@ -154,7 +157,7 @@ class Generator(nn.Module):
         rgb = self.to_rgb(x)
         return rgb, alpha
 
-class piGAN(nn.Module):
+class Generator(nn.Module):
     def __init__(self, image_size, dim, dim_hidden):
         super().__init__()
         self.image_size = image_size
@@ -178,3 +181,54 @@ class piGAN(nn.Module):
         coors = repeat(self.coors, 'n c -> b n c', b = b).float()
         ray_direction = repeat(ray_direction, 'b c -> b n c', n = coors.shape[1])
         return self.G(x, ray_direction, coors)
+
+class DiscriminatorBlock(nn.Module):
+    def __init__(self, dim, dim_out):
+        super().__init__()
+        self.res = nn.Conv2d(dim, dim_out, 1)
+
+        self.net = nn.Sequential(
+            nn.Conv2d(dim, dim_out, 3, padding = 1),
+            leaky_relu(),
+            nn.Conv2d(dim_out, dim_out, 3, padding = 1),
+            leaky_relu()
+        )
+
+        self.down = nn.AvgPool2d(2)
+
+    def forward(self, x):
+        res = self.res(x)
+        x = self.net(x)
+        x = res + x
+        return self.down(x)
+
+class Discriminator(nn.Module):
+    def __init__(self, image_size):
+        super().__init__()
+        resolutions = math.log2(image_size)
+        assert resolutions.is_integer(), 'image size must be a power of 2'
+        resolutions = int(resolutions)
+        layers = resolutions - 1
+
+        init_chan = 64
+        max_chan = 400
+        chans = list(reversed(list(map(lambda t: 2 ** (11 - t), range(layers)))))
+        chans = list(map(lambda n: min(max_chan, n), chans))
+        chans = [init_chan, *chans]
+        final_chan = chans[-1]
+
+        self.layers = nn.ModuleList([])
+        for in_chan, out_chan in zip(chans[:-1], chans[1:]):
+            self.layers.append(DiscriminatorBlock(
+                dim = in_chan,
+                dim_out = out_chan
+            ))
+
+        self.initial_conv = nn.Sequential(nn.Conv2d(3, init_chan, 1), leaky_relu())
+        self.final_conv = nn.Conv2d(final_chan, 1, 2)
+
+    def forward(self, x):
+        x = self.initial_conv(x)
+        for layer in self.layers:
+            x = layer(x)
+        return self.final_conv(x)
