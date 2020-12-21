@@ -265,13 +265,19 @@ class Discriminator(nn.Module):
         self.alpha -= (1 / self.add_layer_iters)
         self.alpha.clamp_(min = 0.)
 
-    def forward(self, x):
+    def forward(self, img):
+        x = img
+
         for resolution, from_rgb, layer in zip(self.resolutions, self.from_rgb_layers, self.layers):
             if self.resolution < resolution:
                 continue
 
             if self.resolution == resolution:
                 x = from_rgb(x)
+
+            if bool(resolution == (self.resolution // 2)) and bool(self.alpha > 0):
+                x_down = F.interpolate(img, scale_factor = 0.5)
+                x = x * (1 - self.alpha) + from_rgb(x_down) * self.alpha
 
             x = layer(x)
 
