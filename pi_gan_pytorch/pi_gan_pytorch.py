@@ -206,35 +206,80 @@ class DiscriminatorBlock(nn.Module):
         return self.down(x)
 
 class Discriminator(nn.Module):
-    def __init__(self, image_size):
+    def __init__(
+        self,
+        image_size,
+        init_chan = 64,
+        max_chan = 400,
+        init_resolution = 16,
+        add_layer_iters = 10000
+    ):
         super().__init__()
         resolutions = math.log2(image_size)
         assert resolutions.is_integer(), 'image size must be a power of 2'
         resolutions = int(resolutions)
         layers = resolutions - 1
 
-        init_chan = 64
-        max_chan = 400
         chans = list(reversed(list(map(lambda t: 2 ** (11 - t), range(layers)))))
         chans = list(map(lambda n: min(max_chan, n), chans))
         chans = [init_chan, *chans]
         final_chan = chans[-1]
 
+        self.from_rgb_layers = nn.ModuleList([])
         self.layers = nn.ModuleList([])
-        for in_chan, out_chan in zip(chans[:-1], chans[1:]):
+        self.resolutions = list(map(lambda t: 2 ** (7 - t), range(layers)))
+
+        for resolution, in_chan, out_chan in zip(self.resolutions, chans[:-1], chans[1:]):
+
+            from_rgb_layer = nn.Sequential(
+                CoordConv(3, in_chan, kernel_size = 1),
+                leaky_relu()
+            ) if resolution >= init_resolution else None
+
+            self.from_rgb_layers.append(from_rgb_layer)
+
             self.layers.append(DiscriminatorBlock(
                 dim = in_chan,
                 dim_out = out_chan
             ))
 
-        self.initial_conv = nn.Sequential(CoordConv(3, init_chan, kernel_size = 1), leaky_relu())
         self.final_conv = CoordConv(final_chan, 1, kernel_size = 2)
 
+        self.add_layer_iters = add_layer_iters
+        self.register_buffer('alpha', torch.tensor(0.))
+        self.register_buffer('resolution', torch.tensor(init_resolution))
+        self.register_buffer('iterations', torch.tensor(0.))
+
+    def incr_iter_(self):
+        self.iterations += 1
+
+        if self.iterations >= self.add_layer_iters:
+            self.alpha.fill_(1.)
+            self.iterations.fill_(0.)
+            self.resolution *= 2
+            return
+
+        if self.alpha == 0:
+            return
+
+        self.alpha -= (1 / self.add_layer_iters)
+        self.alpha.clamp_(min = 0.)
+
     def forward(self, x):
-        x = self.initial_conv(x)
-        for layer in self.layers:
+        for resolution, from_rgb, layer in zip(self.resolutions, self.from_rgb_layers, self.layers):
+            if self.resolution < resolution:
+                continue
+
+            if self.resolution == resolution:
+                x = from_rgb(x)
+
             x = layer(x)
-        return self.final_conv(x)
+
+        out = self.final_conv(x)
+
+        if self.training:
+            self.incr_iter_()
+        return out
 
 # pi-GAN class
 
