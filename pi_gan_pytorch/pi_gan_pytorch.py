@@ -217,6 +217,8 @@ class Discriminator(nn.Module):
         super().__init__()
         resolutions = math.log2(image_size)
         assert resolutions.is_integer(), 'image size must be a power of 2'
+        assert math.log2(init_resolution).is_integer(), 'initial resolution must be power of 2'
+
         resolutions = int(resolutions)
         layers = resolutions - 1
 
