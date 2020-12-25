@@ -123,8 +123,15 @@ class SirenNet(nn.Module):
 
 # generator
 
-class Generator(nn.Module):
-    def __init__(self, image_size, dim, dim_hidden, siren_num_layers = 6):
+class SirenGenerator(nn.Module):
+    def __init__(
+        self,
+        *,
+        image_size,
+        dim,
+        dim_hidden,
+        siren_num_layers = 6
+    ):
         super().__init__()
 
         self.mapping = MappingNetwork(
@@ -159,7 +166,14 @@ class Generator(nn.Module):
         return rgb, alpha
 
 class Generator(nn.Module):
-    def __init__(self, image_size, dim, dim_hidden):
+    def __init__(
+        self,
+        *,
+        image_size,
+        dim,
+        dim_hidden,
+        siren_num_layers
+    ):
         super().__init__()
         self.image_size = image_size
 
@@ -171,10 +185,11 @@ class Generator(nn.Module):
         coors = rearrange(coors, 'c h w -> (h w) c')
         self.register_buffer('coors', coors)
 
-        self.G = Generator(
+        self.G = SirenGenerator(
             image_size = image_size,
             dim = dim,
-            dim_hidden = dim_hidden
+            dim_hidden = dim_hidden,
+            siren_num_layers = siren_num_layers
         )
 
     def forward(self, x, ray_direction):
@@ -292,11 +307,28 @@ class Discriminator(nn.Module):
 # pi-GAN class
 
 class piGAN(nn.Module):
-    def __init__(self):
+    def __init__(
+        self,
+        *,
+        image_size,
+        dim,
+        generator_dim_hidden = 256,
+        siren_num_layers = 6,
+        add_layer_iters = 10000
+    ):
         super().__init__()
+        self.G = Generator(
+            image_size = image_size,
+            dim = dim,
+            dim_hidden = generator_dim_hidden,
+            siren_num_layers = siren_num_layers
 
-    def forward(self, x):
-        return x
+        )
+
+        self.D = Discriminator(
+            image_size = image_size,
+            add_layer_iters = add_layer_iters
+        )
 
 # trainer
 
