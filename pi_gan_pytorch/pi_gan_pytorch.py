@@ -97,7 +97,7 @@ class MappingNetwork(nn.Module):
 # siren network
 
 class SirenNet(nn.Module):
-    def __init__(self, dim_in, dim_hidden, dim_out, num_layers, w0 = 30., w0_initial = 30., use_bias = True, final_activation = None):
+    def __init__(self, dim_in, dim_hidden, dim_out, num_layers, w0 = 1., w0_initial = 30., use_bias = True, final_activation = None):
         super().__init__()
         self.layers = nn.ModuleList([])
 
