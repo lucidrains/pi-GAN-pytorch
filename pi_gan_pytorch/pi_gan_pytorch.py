@@ -38,9 +38,6 @@ def get_module_device(module):
 
 # losses
 
-def loss_fn(u):
-    return -torch.log(1 + torch.exp(-u))
-
 def gradient_penalty(images, output, weight = 10):
     batch_size, device = images.shape[0], images.device
     gradients = torch_grad(outputs=output, inputs=images,
@@ -236,7 +233,9 @@ class Generator(nn.Module):
         coors = repeat(self.coors, 'n c -> b n c', b = b).float()
         ray_direction = repeat(ray_direction, 'b c -> b n c', n = coors.shape[1])
         rgb, alpha = self.G(x, ray_direction, coors) # not sure what to do with alpha
-        return rearrange(rgb, 'b (h w) c -> b c h w', h = self.image_size)
+        rgb = rearrange(rgb, 'b (h w) c -> b c h w', h = self.image_size)
+        rgb = (rgb + 1) / 2
+        return rgb
 
 # discriminator
 
@@ -267,7 +266,7 @@ class Discriminator(nn.Module):
         image_size,
         init_chan = 64,
         max_chan = 400,
-        init_resolution = 16,
+        init_resolution = 8,
         add_layer_iters = 10000
     ):
         super().__init__()
@@ -339,7 +338,7 @@ class Discriminator(nn.Module):
             x = layer(x)
 
         out = self.final_conv(x)
-        return out.sigmoid()
+        return out
 
 # pi-GAN class
 
@@ -463,7 +462,7 @@ class Trainer(nn.Module):
         self.gradient_accumulate_every = gradient_accumulate_every
 
         self.dataset = ImageDataset(folder = folder, image_size = gan.D.resolution.item())
-        self.dataloader = cycle(DataLoader(self.dataset, batch_size = batch_size, shuffle = True))
+        self.dataloader = cycle(DataLoader(self.dataset, batch_size = batch_size, shuffle = True, drop_last = True))
 
         self.last_loss_D = 0
         self.last_loss_G = 0
@@ -481,6 +480,10 @@ class Trainer(nn.Module):
             G.set_image_size(image_size)
             self.dataset.create_transform(image_size)
 
+        # gp
+
+        apply_gp = self.iterations % 4 == 0
+
         # train discriminator
 
         D.train()
@@ -491,17 +494,20 @@ class Trainer(nn.Module):
             images = images.cuda().requires_grad_()
 
             real_out = D(images)
-            loss_real = loss_fn(-real_out).mean()
-            gp = gradient_penalty(images, real_out)
 
-            fake_out = sample_generator(G, batch_size).detach()
-            loss_fake = loss_fn(D(fake_out)).mean()
+            fake_imgs = sample_generator(G, batch_size).detach()
+            fake_out = D(fake_imgs)
 
-            loss = gp + loss_real + loss_fake
-            self.last_loss_gp = to_value(gp)
+            divergence = (F.relu(1 + real_out) + F.relu(1 - fake_out)).mean()
+            loss = divergence
+
+            if apply_gp:
+                gp = gradient_penalty(images, real_out)
+                self.last_loss_gp = to_value(gp)
+                loss = loss + gp
 
             (loss / accumulate_every).backward()
-            loss_D += to_value(loss) / accumulate_every
+            loss_D += to_value(divergence) / accumulate_every
 
         self.last_loss_D = loss_D
 
@@ -515,7 +521,7 @@ class Trainer(nn.Module):
 
         for _ in range(accumulate_every):
             fake_out = sample_generator(G, batch_size)
-            loss = loss_fn(-D(fake_out)).mean()
+            loss = D(fake_out).mean()
             (loss / accumulate_every).backward()
             loss_G += to_value(loss) / accumulate_every
 
@@ -542,4 +548,5 @@ class Trainer(nn.Module):
             if self.iterations % self.sample_every == 0:
                 i = self.iterations // self.sample_every
                 imgs = sample_generator(self.gan.G, 4)
+                imgs.clamp_(0., 1.)
                 save_image(imgs, f'./{i}.png', nrow = 2)
