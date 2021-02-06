@@ -1,13 +1,25 @@
 import math
+from pathlib import Path
+from functools import partial
+
 import torch
 from torch import nn, einsum
 import torch.nn.functional as F
+from torch.autograd import grad as torch_grad
 
+from torch.utils.data import Dataset, DataLoader
 from torch.optim import Adam
 from torch.optim.lr_scheduler import LambdaLR
 
+from tqdm import trange
+from PIL import Image
+import torchvision
+import torchvision.transforms as T
+
 from pi_gan_pytorch.coordconv import CoordConv
 from einops import rearrange, repeat
+
+assert torch.cuda.is_available(), 'You need to have an Nvidia GPU with CUDA installed.'
 
 # helper
 
@@ -16,6 +28,24 @@ def exists(val):
 
 def leaky_relu(p = 0.2):
     return nn.LeakyReLU(p)
+
+def to_value(t):
+    return t.clone().detach().item()
+
+# losses
+
+def loss_fn(u):
+    return -torch.log(1 + torch.exp(-u))
+
+def gradient_penalty(images, output, weight = 10):
+    batch_size, device = images.shape[0], images.device
+    gradients = torch_grad(outputs=output, inputs=images,
+                           grad_outputs=torch.ones(output.size(), device=device),
+                           create_graph=True, retain_graph=True, only_inputs=True)[0]
+
+    gradients = gradients.reshape(batch_size, -1)
+    l2 = ((gradients.norm(2, dim = 1) - 1) ** 2).mean()
+    return weight * l2
 
 # sin activation
 
@@ -195,35 +225,12 @@ class Generator(nn.Module):
 
     def forward(self, x, ray_direction):
         assert ray_direction.shape[-1] == 2, 'ray direction should have a dimension of 2'
-
         device, b = x.device, x.shape[0]
         coors = repeat(self.coors, 'n c -> b n c', b = b).float()
         ray_direction = repeat(ray_direction, 'b c -> b n c', n = coors.shape[1])
         rgb, alpha = self.G(x, ray_direction, coors) # not sure what to do with alpha
         return rearrange(rgb, 'b (h w) c -> b c h w', h = self.image_size)
 
-class SirenWrapper(nn.Module):
-    def __init__(self, net, image_width, image_height):
-        super().__init__()
-        assert isinstance(net, SirenNet), 'SirenWrapper must receive a Siren network'
-
-        self.net = net
-        self.image_width = image_width
-        self.image_height = image_height
-
-        tensors = [torch.linspace(-1, 1, steps = image_width), torch.linspace(-1, 1, steps = image_height)]
-        mgrid = torch.stack(torch.meshgrid(*tensors), dim=-1)
-        mgrid = rearrange(mgrid, 'h w c -> (h w) c')
-        self.register_buffer('grid', mgrid)
-
-    def forward(self, img = None):
-        coords = self.grid.clone().detach().requires_grad_()
-        out = self.net(coords)
-        out = rearrange(out, '(h w) c -> () c h w', h = self.image_height, w = self.image_width)
-
-        if exists(img):
-            return F.mse_loss(img, out)
-        return out
 # discriminator
 
 class DiscriminatorBlock(nn.Module):
@@ -252,8 +259,8 @@ class Discriminator(nn.Module):
         image_size,
         init_chan = 64,
         max_chan = 400,
-        init_resolution = 16,
-        add_layer_iters = 10000
+        init_resolution = 8,
+        add_layer_iters = 2
     ):
         super().__init__()
         resolutions = math.log2(image_size)
@@ -328,7 +335,8 @@ class Discriminator(nn.Module):
 
         if self.training:
             self.incr_iter_()
-        return out
+
+        return out.sigmoid()
 
 # pi-GAN class
 
@@ -343,6 +351,8 @@ class piGAN(nn.Module):
         add_layer_iters = 10000
     ):
         super().__init__()
+        self.dim = dim
+
         self.G = Generator(
             image_size = image_size,
             dim = dim,
@@ -356,12 +366,64 @@ class piGAN(nn.Module):
             add_layer_iters = add_layer_iters
         )
 
+# dataset
+
+def cycle(iterable):
+    while True:
+        for i in iterable:
+            yield i
+
+def resize_to_minimum_size(min_size, image):
+    if max(*image.size) < min_size:
+        return torchvision.transforms.functional.resize(image, min_size)
+    return image
+
+class ImageDataset(Dataset):
+    def __init__(
+        self,
+        folder,
+        image_size,
+        transparent = False,
+        aug_prob = 0.,
+        exts = ['jpg', 'jpeg', 'png']
+    ):
+        super().__init__()
+        self.folder = folder
+        self.image_size = image_size
+        self.paths = [p for ext in exts for p in Path(f'{folder}').glob(f'**/*.{ext}')]
+        assert len(self.paths) > 0, f'No images were found in {folder} for training'
+
+        self.transform = T.Compose([
+            T.Lambda(partial(resize_to_minimum_size, image_size)),
+            T.CenterCrop(image_size),
+            T.Resize(image_size),
+            T.ToTensor()
+        ])
+
+    def __len__(self):
+        return len(self.paths)
+
+    def __getitem__(self, index):
+        path = self.paths[index]
+        img = Image.open(path)
+        return self.transform(img)
+
 # trainer
+
+def sample_generator(G, batch_size, dim):
+    rand_latents = torch.randn(batch_size, dim).cuda()
+    rand_ray_dir = torch.randn(batch_size, 2).cuda()
+    return G(rand_latents, rand_ray_dir)
 
 class Trainer(nn.Module):
     def __init__(
         self,
+        *,
         gan,
+        folder,
+        batch_size = 1,
+        gradient_accumulate_every = 4,
+        num_train_steps = 50000,
         lr_gen = 5e-5,
         lr_discr = 4e-4,
         target_lr_gen = 1e-5,
@@ -369,20 +431,83 @@ class Trainer(nn.Module):
         lr_decay_span = 10000
     ):
         super().__init__()
-        self.gan = gan
+        self.gan = gan.cuda()
 
         self.optim_D = Adam(self.gan.D.parameters(), betas=(0, 0.9), lr = lr_discr)
         self.optim_G = Adam(self.gan.G.parameters(), betas=(0, 0.9), lr = lr_gen)
 
-        D_decay_fn = lambda i: lr_gen - max((lr_gen - target_lr_gen) / lr_decay_span, 0)
-        G_decay_fn = lambda i: lr_discr - max((lr_discr - target_lr_discr) / lr_decay_span, 0)
+        D_decay_fn = lambda i: max(1 - i / lr_decay_span, 0) + (target_lr_discr / lr_discr) * min(i / lr_decay_span, 1)
+        G_decay_fn = lambda i: max(1 - i / lr_decay_span, 0) + (target_lr_gen / lr_gen) * min(i / lr_decay_span, 1)
 
         self.sched_D = LambdaLR(self.optim_D, D_decay_fn)
         self.sched_G = LambdaLR(self.optim_G, G_decay_fn)
 
+        self.iterations = 0
+        self.batch_size = batch_size
+        self.num_train_steps = num_train_steps
+        self.gradient_accumulate_every = gradient_accumulate_every
+        self.dataset = ImageDataset(folder = folder, image_size = gan.D.resolution.item())
+        self.dataloader = cycle(DataLoader(self.dataset, batch_size = batch_size, shuffle = True))
+
+        self.last_loss_D = 0
+        self.last_loss_G = 0
+
     def step(self):
+        D, G, batch_size, dim, accumulate_every = self.gan.D, self.gan.G, self.batch_size, self.gan.dim, self.gradient_accumulate_every
+
+        # train discriminator
+
+        D.train()
+        loss_D = 0
+
+        for _ in range(accumulate_every):
+            images = next(self.dataloader)
+            images = images.cuda().requires_grad_()
+
+            real_out = D(images)
+            loss_real = loss_fn(-real_out).mean()
+            gp = gradient_penalty(images, real_out)
+
+            fake_out = sample_generator(G, batch_size, dim).detach()
+            loss_fake = loss_fn(D(fake_out)).mean()
+
+            loss = gp + loss_real + loss_fake
+            self.last_loss_gp = to_value(gp)
+
+            (loss / accumulate_every).backward()
+            loss_D += to_value(loss) / accumulate_every
+
+        self.last_loss_D = loss_D
+
+        self.optim_D.step()
+        self.optim_D.zero_grad()
+
+        # train generator
+
+        G.train()
+        loss_G = 0
+
+        for _ in range(accumulate_every):
+            fake_out = sample_generator(G, batch_size, dim)
+            loss = loss_fn(-D(fake_out)).mean()
+            (loss / accumulate_every).backward()
+            loss_G += to_value(loss) / accumulate_every
+
+        self.last_loss_G = loss_G
+
+        self.optim_G.step()
+        self.optim_G.zero_grad()
+
+        # update schedulers
+
         self.sched_D.step()
         self.sched_G.step()
 
-    def forward(self, x):
-        return x
+        self.iterations += 1
+
+    def forward(self):
+        for _ in trange(self.num_train_steps):
+            self.step()
+            print(f'D: {self.last_loss_D:.2f} - G: {self.last_loss_G:.2f} - GP: {self.last_loss_gp:.2f}')
+
+        return
