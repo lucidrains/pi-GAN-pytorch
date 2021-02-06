@@ -14,6 +14,7 @@ from torch.optim.lr_scheduler import LambdaLR
 from tqdm import trange
 from PIL import Image
 import torchvision
+from torchvision.utils import save_image
 import torchvision.transforms as T
 
 from pi_gan_pytorch.coordconv import CoordConv
@@ -133,7 +134,7 @@ class MappingNetwork(nn.Module):
 # siren network
 
 class SirenNet(nn.Module):
-    def __init__(self, dim_in, dim_hidden, dim_out, num_layers, w0 = 1., w0_initial = 30., use_bias = True, final_activation = None):
+    def __init__(self, dim_in, dim_hidden, dim_out, num_layers, w0 = 30., w0_initial = 30., use_bias = True, final_activation = None):
         super().__init__()
         self.layers = nn.ModuleList([])
 
@@ -210,6 +211,8 @@ class Generator(nn.Module):
         siren_num_layers
     ):
         super().__init__()
+        self.dim = dim
+
         self.G = SirenGenerator(
             dim = dim,
             dim_hidden = dim_hidden,
@@ -263,7 +266,7 @@ class Discriminator(nn.Module):
         image_size,
         init_chan = 64,
         max_chan = 400,
-        init_resolution = 8,
+        init_resolution = 16,
         add_layer_iters = 10000
     ):
         super().__init__()
@@ -411,7 +414,8 @@ class ImageDataset(Dataset):
 
 # trainer
 
-def sample_generator(G, batch_size, dim):
+def sample_generator(G, batch_size):
+    dim = G.dim
     rand_latents = torch.randn(batch_size, dim).cuda()
     rand_ray_dir = torch.randn(batch_size, 2).cuda()
     return G(rand_latents, rand_ray_dir)
@@ -425,6 +429,8 @@ class Trainer(nn.Module):
         add_layers_iters = 10000,
         batch_size = 1,
         gradient_accumulate_every = 4,
+        sample_every = 100,
+        log_every = 10,
         num_train_steps = 50000,
         lr_gen = 5e-5,
         lr_discr = 4e-4,
@@ -450,7 +456,11 @@ class Trainer(nn.Module):
         self.iterations = 0
         self.batch_size = batch_size
         self.num_train_steps = num_train_steps
+
+        self.log_every = log_every
+        self.sample_every = sample_every
         self.gradient_accumulate_every = gradient_accumulate_every
+
         self.dataset = ImageDataset(folder = folder, image_size = gan.D.resolution.item())
         self.dataloader = cycle(DataLoader(self.dataset, batch_size = batch_size, shuffle = True))
 
@@ -462,8 +472,10 @@ class Trainer(nn.Module):
 
         # set appropriate image size
 
-        if self.iterations != 0 and self.iterations % self.add_layers_iters == 0:
-            D.increase_resolution_()
+        if self.iterations % self.add_layers_iters == 0:
+            if self.iterations != 0:
+                D.increase_resolution_()
+
             image_size = D.resolution.item()
             G.set_image_size(image_size)
             self.dataset.create_transform(image_size)
@@ -481,7 +493,7 @@ class Trainer(nn.Module):
             loss_real = loss_fn(-real_out).mean()
             gp = gradient_penalty(images, real_out)
 
-            fake_out = sample_generator(G, batch_size, dim).detach()
+            fake_out = sample_generator(G, batch_size).detach()
             loss_fake = loss_fn(D(fake_out)).mean()
 
             loss = gp + loss_real + loss_fake
@@ -501,7 +513,7 @@ class Trainer(nn.Module):
         loss_G = 0
 
         for _ in range(accumulate_every):
-            fake_out = sample_generator(G, batch_size, dim)
+            fake_out = sample_generator(G, batch_size)
             loss = loss_fn(-D(fake_out)).mean()
             (loss / accumulate_every).backward()
             loss_G += to_value(loss) / accumulate_every
@@ -522,6 +534,11 @@ class Trainer(nn.Module):
     def forward(self):
         for _ in trange(self.num_train_steps):
             self.step()
-            print(f'D: {self.last_loss_D:.2f} - G: {self.last_loss_G:.2f} - GP: {self.last_loss_gp:.2f}')
 
-        return
+            if self.iterations % self.log_every == 0:
+                print(f'I: {self.gan.D.resolution.item()} | D: {self.last_loss_D:.2f} | G: {self.last_loss_G:.2f} | GP: {self.last_loss_gp:.2f}')
+
+            if self.iterations % self.sample_every == 0:
+                i = self.iterations // self.sample_every
+                imgs = sample_generator(self.gan.G, 4)
+                save_image(imgs, f'./{i}.png', nrow = 2)
