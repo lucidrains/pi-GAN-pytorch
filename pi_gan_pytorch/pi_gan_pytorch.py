@@ -99,7 +99,7 @@ class Siren(nn.Module):
 # mapping network
 
 class EqualLinear(nn.Module):
-    def __init__(self, in_dim, out_dim, lr_mul = 1, bias = True):
+    def __init__(self, in_dim, out_dim, lr_mul = 0.1, bias = True):
         super().__init__()
         self.weight = nn.Parameter(torch.randn(out_dim, in_dim))
         if bias:
@@ -223,7 +223,7 @@ class Generator(nn.Module):
         self.image_size = image_size
 
         tensors = [torch.linspace(-1, 1, steps = image_size), torch.linspace(-1, 1, steps = image_size)]
-        coors = torch.stack(torch.meshgrid(*tensors), dim=-1)
+        coors = torch.stack(torch.meshgrid(*tensors), dim = -1)
         coors = rearrange(coors, 'h w c -> (h w) c')
         self.register_buffer('coors', coors.to(device))
 
@@ -234,7 +234,7 @@ class Generator(nn.Module):
         ray_direction = repeat(ray_direction, 'b c -> b n c', n = coors.shape[1])
         rgb, alpha = self.G(x, ray_direction, coors) # not sure what to do with alpha
         rgb = rearrange(rgb, 'b (h w) c -> b c h w', h = self.image_size)
-        rgb = (rgb + 1) / 2
+        rgb = (rgb.tanh() + 1) / 2
         return rgb
 
 # discriminator
@@ -495,8 +495,8 @@ class Trainer(nn.Module):
 
             real_out = D(images)
 
-            fake_imgs = sample_generator(G, batch_size).detach()
-            fake_out = D(fake_imgs)
+            fake_imgs = sample_generator(G, batch_size)
+            fake_out = D(fake_imgs.clone().detach())
 
             divergence = (F.relu(1 + real_out) + F.relu(1 - fake_out)).mean()
             loss = divergence
