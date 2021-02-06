@@ -32,6 +32,9 @@ def leaky_relu(p = 0.2):
 def to_value(t):
     return t.clone().detach().item()
 
+def get_module_device(module):
+    return next(module.parameters()).device
+
 # losses
 
 def loss_fn(u):
@@ -207,21 +210,22 @@ class Generator(nn.Module):
         siren_num_layers
     ):
         super().__init__()
-        self.set_image_size(image_size)
-
         self.G = SirenGenerator(
             dim = dim,
             dim_hidden = dim_hidden,
             siren_num_layers = siren_num_layers
         )
 
+        self.set_image_size(image_size)
+
     def set_image_size(self, image_size):
+        device = get_module_device(self)
         self.image_size = image_size
 
         tensors = [torch.linspace(-1, 1, steps = image_size), torch.linspace(-1, 1, steps = image_size)]
         coors = torch.stack(torch.meshgrid(*tensors), dim=-1)
         coors = rearrange(coors, 'h w c -> (h w) c')
-        self.register_buffer('coors', coors)
+        self.register_buffer('coors', coors.to(device))
 
     def forward(self, x, ray_direction):
         assert ray_direction.shape[-1] == 2, 'ray direction should have a dimension of 2'
@@ -260,7 +264,7 @@ class Discriminator(nn.Module):
         init_chan = 64,
         max_chan = 400,
         init_resolution = 8,
-        add_layer_iters = 2
+        add_layer_iters = 10000
     ):
         super().__init__()
         resolutions = math.log2(image_size)
@@ -277,6 +281,7 @@ class Discriminator(nn.Module):
 
         self.from_rgb_layers = nn.ModuleList([])
         self.layers = nn.ModuleList([])
+        self.image_size = image_size
         self.resolutions = list(map(lambda t: 2 ** (7 - t), range(layers)))
 
         for resolution, in_chan, out_chan in zip(self.resolutions, chans[:-1], chans[1:]):
@@ -300,18 +305,16 @@ class Discriminator(nn.Module):
         self.register_buffer('resolution', torch.tensor(init_resolution))
         self.register_buffer('iterations', torch.tensor(0.))
 
-    def incr_iter_(self):
+    def increase_resolution_(self):
+        if self.resolution >= self.image_size:
+            return
+
+        self.alpha += self.alpha + (1 - self.alpha)
+        self.iterations.fill_(0.)
+        self.resolution *= 2
+
+    def update_iter_(self):
         self.iterations += 1
-
-        if self.iterations >= self.add_layer_iters:
-            self.alpha.fill_(1.)
-            self.iterations.fill_(0.)
-            self.resolution *= 2
-            return
-
-        if self.alpha == 0:
-            return
-
         self.alpha -= (1 / self.add_layer_iters)
         self.alpha.clamp_(min = 0.)
 
@@ -332,10 +335,6 @@ class Discriminator(nn.Module):
             x = layer(x)
 
         out = self.final_conv(x)
-
-        if self.training:
-            self.incr_iter_()
-
         return out.sigmoid()
 
 # pi-GAN class
@@ -392,7 +391,9 @@ class ImageDataset(Dataset):
         self.image_size = image_size
         self.paths = [p for ext in exts for p in Path(f'{folder}').glob(f'**/*.{ext}')]
         assert len(self.paths) > 0, f'No images were found in {folder} for training'
+        self.create_transform(image_size)
 
+    def create_transform(self, image_size):
         self.transform = T.Compose([
             T.Lambda(partial(resize_to_minimum_size, image_size)),
             T.CenterCrop(image_size),
@@ -421,6 +422,7 @@ class Trainer(nn.Module):
         *,
         gan,
         folder,
+        add_layers_iters = 10000,
         batch_size = 1,
         gradient_accumulate_every = 4,
         num_train_steps = 50000,
@@ -431,6 +433,9 @@ class Trainer(nn.Module):
         lr_decay_span = 10000
     ):
         super().__init__()
+        gan.D.add_layer_iters = add_layers_iters
+        self.add_layers_iters = add_layers_iters
+
         self.gan = gan.cuda()
 
         self.optim_D = Adam(self.gan.D.parameters(), betas=(0, 0.9), lr = lr_discr)
@@ -454,6 +459,14 @@ class Trainer(nn.Module):
 
     def step(self):
         D, G, batch_size, dim, accumulate_every = self.gan.D, self.gan.G, self.batch_size, self.gan.dim, self.gradient_accumulate_every
+
+        # set appropriate image size
+
+        if self.iterations != 0 and self.iterations % self.add_layers_iters == 0:
+            D.increase_resolution_()
+            image_size = D.resolution.item()
+            G.set_image_size(image_size)
+            self.dataset.create_transform(image_size)
 
         # train discriminator
 
@@ -504,6 +517,7 @@ class Trainer(nn.Module):
         self.sched_G.step()
 
         self.iterations += 1
+        D.update_iter_()
 
     def forward(self):
         for _ in trange(self.num_train_steps):
