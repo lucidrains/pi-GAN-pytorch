@@ -130,7 +130,6 @@ class SirenGenerator(nn.Module):
     def __init__(
         self,
         *,
-        image_size,
         dim,
         dim_hidden,
         siren_num_layers = 6
@@ -178,29 +177,53 @@ class Generator(nn.Module):
         siren_num_layers
     ):
         super().__init__()
-        self.image_size = image_size
-
-        coors = torch.stack(torch.meshgrid(
-            torch.arange(image_size),
-            torch.arange(image_size)
-        ))
-
-        coors = rearrange(coors, 'c h w -> (h w) c')
-        self.register_buffer('coors', coors)
+        self.set_image_size(image_size)
 
         self.G = SirenGenerator(
-            image_size = image_size,
             dim = dim,
             dim_hidden = dim_hidden,
             siren_num_layers = siren_num_layers
         )
 
+    def set_image_size(self, image_size):
+        self.image_size = image_size
+
+        tensors = [torch.linspace(-1, 1, steps = image_size), torch.linspace(-1, 1, steps = image_size)]
+        coors = torch.stack(torch.meshgrid(*tensors), dim=-1)
+        coors = rearrange(coors, 'h w c -> (h w) c')
+        self.register_buffer('coors', coors)
+
     def forward(self, x, ray_direction):
+        assert ray_direction.shape[-1] == 2, 'ray direction should have a dimension of 2'
+
         device, b = x.device, x.shape[0]
         coors = repeat(self.coors, 'n c -> b n c', b = b).float()
         ray_direction = repeat(ray_direction, 'b c -> b n c', n = coors.shape[1])
-        return self.G(x, ray_direction, coors)
+        rgb, alpha = self.G(x, ray_direction, coors) # not sure what to do with alpha
+        return rearrange(rgb, 'b (h w) c -> b c h w', h = self.image_size)
 
+class SirenWrapper(nn.Module):
+    def __init__(self, net, image_width, image_height):
+        super().__init__()
+        assert isinstance(net, SirenNet), 'SirenWrapper must receive a Siren network'
+
+        self.net = net
+        self.image_width = image_width
+        self.image_height = image_height
+
+        tensors = [torch.linspace(-1, 1, steps = image_width), torch.linspace(-1, 1, steps = image_height)]
+        mgrid = torch.stack(torch.meshgrid(*tensors), dim=-1)
+        mgrid = rearrange(mgrid, 'h w c -> (h w) c')
+        self.register_buffer('grid', mgrid)
+
+    def forward(self, img = None):
+        coords = self.grid.clone().detach().requires_grad_()
+        out = self.net(coords)
+        out = rearrange(out, '(h w) c -> () c h w', h = self.image_height, w = self.image_width)
+
+        if exists(img):
+            return F.mse_loss(img, out)
+        return out
 # discriminator
 
 class DiscriminatorBlock(nn.Module):
