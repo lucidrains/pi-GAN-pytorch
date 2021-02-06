@@ -243,7 +243,7 @@ class Generator(nn.Module):
 class DiscriminatorBlock(nn.Module):
     def __init__(self, dim, dim_out):
         super().__init__()
-        self.res = CoordConv(dim, dim_out, kernel_size = 1)
+        self.res = CoordConv(dim, dim_out, kernel_size = 1, stride = 2)
 
         self.net = nn.Sequential(
             CoordConv(dim, dim_out, kernel_size = 3, padding = 1),
@@ -257,8 +257,9 @@ class DiscriminatorBlock(nn.Module):
     def forward(self, x):
         res = self.res(x)
         x = self.net(x)
-        x = res + x
-        return self.down(x)
+        x = self.down(x)
+        x = (x + res) * (2 ** -0.5)
+        return x
 
 class Discriminator(nn.Module):
     def __init__(
@@ -399,8 +400,8 @@ class ImageDataset(Dataset):
     def create_transform(self, image_size):
         self.transform = T.Compose([
             T.Lambda(partial(resize_to_minimum_size, image_size)),
-            T.CenterCrop(image_size),
             T.Resize(image_size),
+            T.CenterCrop(image_size),
             T.ToTensor()
         ])
 
@@ -427,7 +428,7 @@ class Trainer(nn.Module):
         gan,
         folder,
         add_layers_iters = 10000,
-        batch_size = 1,
+        batch_size = 8,
         gradient_accumulate_every = 4,
         sample_every = 100,
         log_every = 10,
