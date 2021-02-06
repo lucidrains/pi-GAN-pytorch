@@ -3,6 +3,9 @@ import torch
 from torch import nn, einsum
 import torch.nn.functional as F
 
+from torch.optim import Adam
+from torch.optim.lr_scheduler import LambdaLR
+
 from pi_gan_pytorch.coordconv import CoordConv
 from einops import rearrange, repeat
 
@@ -333,8 +336,30 @@ class piGAN(nn.Module):
 # trainer
 
 class Trainer(nn.Module):
-    def __init__(self):
+    def __init__(
+        self,
+        gan,
+        lr_gen = 5e-5,
+        lr_discr = 4e-4,
+        target_lr_gen = 1e-5,
+        target_lr_discr = 1e-4,
+        lr_decay_span = 10000
+    ):
         super().__init__()
+        self.gan = gan
+
+        self.optim_D = Adam(self.gan.D.parameters(), betas=(0, 0.9), lr = lr_discr)
+        self.optim_G = Adam(self.gan.G.parameters(), betas=(0, 0.9), lr = lr_gen)
+
+        D_decay_fn = lambda i: lr_gen - max((lr_gen - target_lr_gen) / lr_decay_span, 0)
+        G_decay_fn = lambda i: lr_discr - max((lr_discr - target_lr_discr) / lr_decay_span, 0)
+
+        self.sched_D = LambdaLR(self.optim_D, D_decay_fn)
+        self.sched_G = LambdaLR(self.optim_G, G_decay_fn)
+
+    def step(self):
+        self.sched_D.step()
+        self.sched_G.step()
 
     def forward(self, x):
         return x
