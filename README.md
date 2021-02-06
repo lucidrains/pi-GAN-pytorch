@@ -1,4 +1,4 @@
-<img src="./pi.png" width="500px"></img>
+<img src="./images/diagram.png" width="500px"></img>
 
 ## π-GAN - Pytorch (wip)
 
