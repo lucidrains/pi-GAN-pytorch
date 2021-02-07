@@ -111,7 +111,7 @@ class EqualLinear(nn.Module):
         return F.linear(input, self.weight * self.lr_mul, bias=self.bias * self.lr_mul)
 
 class MappingNetwork(nn.Module):
-    def __init__(self, *, dim, dim_out, depth = 8, lr_mul = 0.1):
+    def __init__(self, *, dim, dim_out, depth = 3, lr_mul = 0.1):
         super().__init__()
 
         layers = []
@@ -163,7 +163,7 @@ class SirenGenerator(nn.Module):
         *,
         dim,
         dim_hidden,
-        siren_num_layers = 6
+        siren_num_layers = 8
     ):
         super().__init__()
 
