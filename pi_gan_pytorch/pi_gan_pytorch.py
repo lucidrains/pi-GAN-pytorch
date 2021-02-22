@@ -125,6 +125,7 @@ class MappingNetwork(nn.Module):
         self.to_beta = nn.Linear(dim, dim_out)
 
     def forward(self, x):
+        x = F.normalize(x, dim = -1)
         x = self.net(x)
         return self.to_gamma(x), self.to_beta(x)
 
@@ -193,7 +194,7 @@ class SirenGenerator(nn.Module):
 
         outs = []
         for coor in coors.split(batch_size):
-            gamma_, beta_ = map(lambda t: repeat(t, 'n -> b n', b = coor.shape[0]), (gamma, beta))
+            gamma_, beta_ = map(lambda t: rearrange(t, 'n -> () n'), (gamma, beta))
             x = self.siren(coor, gamma_, beta_)
             alpha = self.to_alpha(x)
 
@@ -259,7 +260,7 @@ class DiscriminatorBlock(nn.Module):
         res = self.res(x)
         x = self.net(x)
         x = self.down(x)
-        x = (x + res) * (2 ** -0.5)
+        x = x + res
         return x
 
 class Discriminator(nn.Module):
@@ -495,7 +496,6 @@ class Trainer(nn.Module):
         for _ in range(accumulate_every):
             images = next(self.dataloader)
             images = images.cuda().requires_grad_()
-
             real_out = D(images)
 
             fake_imgs = sample_generator(G, batch_size)
