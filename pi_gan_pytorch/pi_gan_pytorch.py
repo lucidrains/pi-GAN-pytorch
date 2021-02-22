@@ -18,6 +18,7 @@ from torchvision.utils import save_image
 import torchvision.transforms as T
 
 from pi_gan_pytorch.coordconv import CoordConv
+from pi_gan_pytorch.nerf import get_image_from_nerf_model
 from einops import rearrange, repeat
 
 assert torch.cuda.is_available(), 'You need to have an Nvidia GPU with CUDA installed.'
@@ -88,10 +89,10 @@ class Siren(nn.Module):
         # FiLM modulation
 
         if exists(gamma):
-            out = out * gamma[:, None, :]
+            out = out * gamma
 
         if exists(beta):
-            out = out + beta[:, None, :]
+            out = out + beta
 
         out = self.activation(out)
         return out
@@ -124,7 +125,6 @@ class MappingNetwork(nn.Module):
         self.to_beta = nn.Linear(dim, dim_out)
 
     def forward(self, x):
-        x = F.normalize(x, dim = 1)
         x = self.net(x)
         return self.to_gamma(x), self.to_beta(x)
 
@@ -173,7 +173,7 @@ class SirenGenerator(nn.Module):
         )
 
         self.siren = SirenNet(
-            dim_in = 2,
+            dim_in = 3,
             dim_hidden = dim_hidden,
             dim_out = dim_hidden,
             num_layers = siren_num_layers
@@ -182,21 +182,27 @@ class SirenGenerator(nn.Module):
         self.to_alpha = nn.Linear(dim_hidden, 1)
 
         self.to_rgb_siren = Siren(
-            dim_in = dim_hidden + 2,
+            dim_in = dim_hidden,
             dim_out = dim_hidden
         )
 
-        self.to_rgb= nn.Linear(dim_hidden, 3)
+        self.to_rgb = nn.Linear(dim_hidden, 3)
 
-    def forward(self, latent, ray_direction, coors):
+    def forward(self, latent, coors, batch_size = 8192):
         gamma, beta = self.mapping(latent)
-        x = self.siren(coors, gamma, beta)
-        alpha = self.to_alpha(x)
 
-        x = torch.cat((x, ray_direction), dim = -1)
-        x = self.to_rgb_siren(x, gamma, beta)
-        rgb = self.to_rgb(x)
-        return rgb, alpha
+        outs = []
+        for coor in coors.split(batch_size):
+            gamma_, beta_ = map(lambda t: repeat(t, 'n -> b n', b = coor.shape[0]), (gamma, beta))
+            x = self.siren(coor, gamma_, beta_)
+            alpha = self.to_alpha(x)
+
+            x = self.to_rgb_siren(x, gamma, beta)
+            rgb = self.to_rgb(x)
+            out = torch.cat((rgb, alpha), dim = -1)
+            outs.append(out)
+
+        return torch.cat(outs)
 
 class Generator(nn.Module):
     def __init__(
@@ -209,33 +215,29 @@ class Generator(nn.Module):
     ):
         super().__init__()
         self.dim = dim
+        self.image_size = image_size
 
-        self.G = SirenGenerator(
+        self.nerf_model = SirenGenerator(
             dim = dim,
             dim_hidden = dim_hidden,
             siren_num_layers = siren_num_layers
         )
 
-        self.set_image_size(image_size)
-
     def set_image_size(self, image_size):
-        device = get_module_device(self)
         self.image_size = image_size
 
-        tensors = [torch.linspace(-1, 1, steps = image_size), torch.linspace(-1, 1, steps = image_size)]
-        coors = torch.stack(torch.meshgrid(*tensors), dim = -1)
-        coors = rearrange(coors, 'h w c -> (h w) c')
-        self.register_buffer('coors', coors.to(device))
+    def forward(self, latents):
+        image_size = self.image_size
+        device, b = latents.device, latents.shape[0]
 
-    def forward(self, x, ray_direction):
-        assert ray_direction.shape[-1] == 2, 'ray direction should have a dimension of 2'
-        device, b = x.device, x.shape[0]
-        coors = repeat(self.coors, 'n c -> b n c', b = b).float()
-        ray_direction = repeat(ray_direction, 'b c -> b n c', n = coors.shape[1])
-        rgb, alpha = self.G(x, ray_direction, coors) # not sure what to do with alpha
-        rgb = rearrange(rgb, 'b (h w) c -> b c h w', h = self.image_size)
-        rgb = (rgb.tanh() + 1) / 2
-        return rgb
+        generated_images = get_image_from_nerf_model(
+            self.nerf_model,
+            latents,
+            image_size,
+            image_size
+        )
+
+        return generated_images
 
 # discriminator
 
@@ -266,7 +268,7 @@ class Discriminator(nn.Module):
         image_size,
         init_chan = 64,
         max_chan = 400,
-        init_resolution = 8,
+        init_resolution = 32,
         add_layer_iters = 10000
     ):
         super().__init__()
@@ -348,6 +350,7 @@ class piGAN(nn.Module):
         *,
         image_size,
         dim,
+        init_resolution = 32,
         generator_dim_hidden = 256,
         siren_num_layers = 6,
         add_layer_iters = 10000
@@ -365,7 +368,8 @@ class piGAN(nn.Module):
 
         self.D = Discriminator(
             image_size = image_size,
-            add_layer_iters = add_layer_iters
+            add_layer_iters = add_layer_iters,
+            init_resolution = init_resolution
         )
 
 # dataset
@@ -417,8 +421,7 @@ class ImageDataset(Dataset):
 def sample_generator(G, batch_size):
     dim = G.dim
     rand_latents = torch.randn(batch_size, dim).cuda()
-    rand_ray_dir = torch.randn(batch_size, 2).cuda()
-    return G(rand_latents, rand_ray_dir)
+    return G(rand_latents)
 
 class Trainer(nn.Module):
     def __init__(
